@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>VarDrop 성능표와 iTransformer 기준 Ours 비교</title>
+<style>
+body{font-family:Arial,Helvetica,sans-serif;margin:24px;color:#122033;line-height:1.45}
+h1{font-size:28px;margin:0 0 18px}
+h2{font-size:20px;margin:28px 0 10px;border-bottom:1px solid #d5dde8;padding-bottom:6px}
+table{border-collapse:collapse;width:max-content;min-width:100%;font-size:13px}
+th,td{border:1px solid #d8e0eb;padding:6px 8px;text-align:right;white-space:nowrap}
+th:first-child,td:first-child,th:nth-child(2),td:nth-child(2),th:nth-child(3),td:nth-child(3){text-align:left}
+thead th{background:#eef3f8}
+.table-wrap{overflow-x:auto;margin:10px 0 18px}
+.note{background:#fff7df;border:1px solid #f0d480;padding:10px 12px;border-radius:6px}
+code,pre{background:#f5f7fb;border:1px solid #d8e0eb;border-radius:6px}
+pre{padding:12px;overflow:auto}
+</style>
+</head>
+<body>
+<h1>VarDrop 성능표와 iTransformer 기준 Ours 비교</h1>
+<section>
+<h2>기술 요약</h2>
+<ul>
+<li>현재 Ours selected route는 <code>coverage-routed representative</code>다.</li>
+<li>성능 표는 paper test 숫자, local iTransformer test baseline, Ours test를 함께 보여준다.</li>
+<li>Ours test가 pending이면 <code>coverage_fallback_test_for_vardrop.csv</code> 생성이 아직 끝나지 않은 상태다.</li>
+<li>효율 표는 논문 하드웨어 값을 제외하고 같은 저장소의 local iTransformer 대비 ratio만 보여준다.</li>
+<li>현재 세션에서는 escalated GPU 실행이 정책상 거절되어 missing test/CUDA median profile이 pending이다.</li>
+</ul>
+</section>
+<section>
+<h2>성능 비교 표</h2>
+<div class="table-wrap"><table><thead><tr><th>Dataset</th><th>Pred</th><th>Ours method</th><th>VarDrop MSE</th><th>VarDrop MAE</th><th>Paper iTransformer MSE</th><th>Paper iTransformer MAE</th><th>Local iTransformer-test MSE</th><th>Local iTransformer-test MAE</th><th>Ours-test MSE</th><th>Ours-test MAE</th><th>Ours/local test MSE ratio</th><th>Ours/local test MAE ratio</th><th>Ours test seeds</th><th>Ours/local val MSE ratio</th><th>Ours/local val MAE ratio</th></tr></thead><tbody><tr><td>Electricity</td><td>96</td><td>fixed_sparse_representative</td><td>0.153</td><td>0.245</td><td>0.150</td><td>0.242</td><td>0.149</td><td>0.240</td><td>0.145</td><td>0.242</td><td>0.977</td><td>1.006</td><td>1</td><td>0.929</td><td>0.984</td></tr><tr><td>Electricity</td><td>192</td><td>fixed_sparse_representative</td><td>0.167</td><td>0.257</td><td>0.166</td><td>0.256</td><td>0.166</td><td>0.258</td><td>0.166</td><td>0.261</td><td>0.995</td><td>1.013</td><td>1</td><td>0.941</td><td>0.984</td></tr><tr><td>Electricity</td><td>336</td><td>fixed_sparse_representative</td><td>0.183</td><td>0.275</td><td>0.184</td><td>0.276</td><td>0.179</td><td>0.272</td><td>0.181</td><td>0.276</td><td>1.010</td><td>1.014</td><td>1</td><td>0.961</td><td>0.996</td></tr><tr><td>Electricity</td><td>720</td><td>fixed_sparse_representative</td><td>0.220</td><td>0.305</td><td>0.214</td><td>0.302</td><td>0.217</td><td>0.303</td><td>0.222</td><td>0.310</td><td>1.023</td><td>1.022</td><td>1</td><td>0.955</td><td>0.994</td></tr><tr><td>Electricity</td><td>Avg</td><td>coverage-routed</td><td>0.181</td><td>0.271</td><td>0.178</td><td>0.269</td><td>0.178</td><td>0.268</td><td>0.178</td><td>0.272</td><td>1.001</td><td>1.014</td><td>1</td><td>0.947</td><td>0.990</td></tr><tr><td>Traffic</td><td>96</td><td>fixed_sparse_representative</td><td>0.396</td><td>0.274</td><td>0.398</td><td>0.272</td><td>0.392</td><td>0.268</td><td>0.457</td><td>0.318</td><td>1.165</td><td>1.189</td><td>1</td><td>0.964</td><td>0.959</td></tr><tr><td>Traffic</td><td>192</td><td>fixed_sparse_representative</td><td>0.417</td><td>0.281</td><td>0.418</td><td>0.279</td><td>0.411</td><td>0.276</td><td>0.468</td><td>0.320</td><td>1.137</td><td>1.159</td><td>1</td><td>0.950</td><td>0.935</td></tr><tr><td>Traffic</td><td>336</td><td>fixed_sparse_representative</td><td>0.435</td><td>0.289</td><td>0.431</td><td>0.286</td><td>0.422</td><td>0.282</td><td>0.484</td><td>0.331</td><td>1.146</td><td>1.172</td><td>1</td><td>0.949</td><td>0.947</td></tr><tr><td>Traffic</td><td>720</td><td>fixed_sparse_representative</td><td>0.472</td><td>0.308</td><td>0.465</td><td>0.304</td><td>0.458</td><td>0.300</td><td>0.509</td><td>0.343</td><td>1.111</td><td>1.141</td><td>1</td><td>0.934</td><td>0.920</td></tr><tr><td>Traffic</td><td>Avg</td><td>coverage-routed</td><td>0.430</td><td>0.288</td><td>0.428</td><td>0.285</td><td>0.421</td><td>0.282</td><td>0.480</td><td>0.328</td><td>1.140</td><td>1.165</td><td>1</td><td>0.949</td><td>0.940</td></tr><tr><td>Weather</td><td>96</td><td>learned_representative</td><td>0.178</td><td>0.218</td><td>0.176</td><td>0.216</td><td>0.175</td><td>0.213</td><td>0.178</td><td>0.220</td><td>1.018</td><td>1.030</td><td>1</td><td>0.931</td><td>0.958</td></tr><tr><td>Weather</td><td>192</td><td>learned_representative</td><td>0.227</td><td>0.258</td><td>0.225</td><td>0.257</td><td>0.224</td><td>0.257</td><td>0.227</td><td>0.260</td><td>1.012</td><td>1.013</td><td>1</td><td>0.982</td><td>0.997</td></tr><tr><td>Weather</td><td>336</td><td>learned_representative</td><td>0.281</td><td>0.297</td><td>0.281</td><td>0.299</td><td>0.283</td><td>0.300</td><td>0.282</td><td>0.301</td><td>0.996</td><td>1.003</td><td>1</td><td>0.966</td><td>0.975</td></tr><tr><td>Weather</td><td>720</td><td>learned_representative</td><td>0.357</td><td>0.347</td><td>0.358</td><td>0.350</td><td>0.359</td><td>0.352</td><td>0.358</td><td>0.350</td><td>0.995</td><td>0.994</td><td>1</td><td>0.983</td><td>0.993</td></tr><tr><td>Weather</td><td>Avg</td><td>coverage-routed</td><td>0.261</td><td>0.280</td><td>0.260</td><td>0.280</td><td>0.260</td><td>0.280</td><td>0.261</td><td>0.283</td><td>1.005</td><td>1.010</td><td>1</td><td>0.966</td><td>0.981</td></tr><tr><td>Solar</td><td>96</td><td>fixed_sparse_representative</td><td>0.202</td><td>0.238</td><td>0.205</td><td>0.236</td><td>0.202</td><td>0.237</td><td>0.207</td><td>0.249</td><td>1.024</td><td>1.051</td><td>1</td><td>1.017</td><td>0.990</td></tr><tr><td>Solar</td><td>192</td><td>fixed_sparse_representative</td><td>0.237</td><td>0.262</td><td>0.239</td><td>0.263</td><td>0.237</td><td>0.263</td><td>0.239</td><td>0.273</td><td>1.007</td><td>1.039</td><td>1</td><td>1.097</td><td>1.050</td></tr><tr><td>Solar</td><td>336</td><td>fixed_sparse_representative</td><td>0.254</td><td>0.275</td><td>0.249</td><td>0.273</td><td>0.249</td><td>0.273</td><td>0.255</td><td>0.286</td><td>1.025</td><td>1.045</td><td>1</td><td>1.106</td><td>1.080</td></tr><tr><td>Solar</td><td>720</td><td>fixed_sparse_representative</td><td>0.252</td><td>0.274</td><td>0.250</td><td>0.275</td><td>0.249</td><td>0.275</td><td>0.256</td><td>0.288</td><td>1.026</td><td>1.044</td><td>1</td><td>1.034</td><td>1.038</td></tr><tr><td>Solar</td><td>Avg</td><td>coverage-routed</td><td>0.236</td><td>0.262</td><td>0.236</td><td>0.262</td><td>0.234</td><td>0.262</td><td>0.239</td><td>0.274</td><td>1.020</td><td>1.045</td><td>1</td><td>1.063</td><td>1.040</td></tr></tbody></table></div>
+</section>
+<section>
+<h2>iTransformer baseline 대비 효율</h2>
+<div class="table-wrap"><table><thead><tr><th>Dataset</th><th>Pred</th><th>iTransformer ms/iter</th><th>Ours ms/iter</th><th>Time ratio</th><th>Time delta</th><th>iTransformer peak GB</th><th>Ours peak GB</th><th>Memory ratio</th><th>Memory delta</th></tr></thead><tbody><tr><td>Electricity</td><td>96</td><td>998.7</td><td>935.9</td><td>0.937</td><td>-6.3%</td><td>0.79</td><td>0.86</td><td>1.081</td><td>+8.1%</td></tr><tr><td>Electricity</td><td>192</td><td>926.5</td><td>989.2</td><td>1.068</td><td>+6.8%</td><td>0.80</td><td>0.87</td><td>1.085</td><td>+8.5%</td></tr><tr><td>Electricity</td><td>336</td><td>983.9</td><td>1013.5</td><td>1.030</td><td>+3.0%</td><td>0.81</td><td>0.88</td><td>1.082</td><td>+8.2%</td></tr><tr><td>Electricity</td><td>720</td><td>994.0</td><td>1064.4</td><td>1.071</td><td>+7.1%</td><td>0.88</td><td>0.93</td><td>1.052</td><td>+5.2%</td></tr><tr><td>Traffic</td><td>96</td><td>1794.6</td><td>1753.8</td><td>0.977</td><td>-2.3%</td><td>4.96</td><td>2.49</td><td>0.501</td><td>-49.9%</td></tr><tr><td>Traffic</td><td>192</td><td>1674.0</td><td>1947.4</td><td>1.163</td><td>+16.3%</td><td>4.98</td><td>2.51</td><td>0.504</td><td>-49.6%</td></tr><tr><td>Traffic</td><td>336</td><td>1706.7</td><td>1905.3</td><td>1.116</td><td>+11.6%</td><td>5.00</td><td>2.55</td><td>0.510</td><td>-49.0%</td></tr><tr><td>Traffic</td><td>720</td><td>1850.4</td><td>1956.9</td><td>1.058</td><td>+5.8%</td><td>5.06</td><td>2.66</td><td>0.525</td><td>-47.5%</td></tr><tr><td>Weather</td><td>96</td><td>142.6</td><td>164.4</td><td>1.153</td><td>+15.3%</td><td>0.17</td><td>0.15</td><td>0.893</td><td>-10.7%</td></tr><tr><td>Weather</td><td>192</td><td>192.0</td><td>218.0</td><td>1.135</td><td>+13.5%</td><td>0.17</td><td>0.15</td><td>0.898</td><td>-10.2%</td></tr><tr><td>Weather</td><td>336</td><td>196.1</td><td>220.2</td><td>1.123</td><td>+12.3%</td><td>0.17</td><td>0.15</td><td>0.907</td><td>-9.3%</td></tr><tr><td>Weather</td><td>720</td><td>199.4</td><td>212.0</td><td>1.063</td><td>+6.3%</td><td>0.18</td><td>0.17</td><td>0.944</td><td>-5.6%</td></tr><tr><td>Solar</td><td>96</td><td>144.1</td><td>184.0</td><td>1.277</td><td>+27.7%</td><td>0.38</td><td>0.68</td><td>1.762</td><td>+76.2%</td></tr><tr><td>Solar</td><td>192</td><td>1831.6</td><td>1933.6</td><td>1.056</td><td>+5.6%</td><td>0.39</td><td>0.68</td><td>1.754</td><td>+75.4%</td></tr><tr><td>Solar</td><td>336</td><td>1981.6</td><td>1829.2</td><td>0.923</td><td>-7.7%</td><td>0.40</td><td>0.70</td><td>1.752</td><td>+75.2%</td></tr><tr><td>Solar</td><td>720</td><td>1910.4</td><td>1737.9</td><td>0.910</td><td>-9.0%</td><td>0.44</td><td>0.73</td><td>1.662</td><td>+66.2%</td></tr></tbody></table></div>
+</section>
+<section>
+<h2>효율 요약</h2>
+<ul>
+<li>평균 train ms/iter ratio: 1.066</li>
+<li>평균 peak allocated memory ratio: 1.057</li>
+<li>train time 5% 이상 개선 cell: 3/16</li>
+<li>train time 1% 이상 악화 cell: 12/16</li>
+<li>memory 5% 이상 개선 cell: 8/16</li>
+<li>memory 1% 이상 악화 cell: 8/16</li>
+</ul>
+</section>
+<section>
+<h2>해석</h2>
+<p>Ours-val은 Electricity/Traffic/Weather에서 local validation baseline 대비 대부분 개선되지만 Solar 장기 horizon이 약하다. 효율은 Traffic에서 memory가 크게 줄어드는 반면, Weather learned route와 Solar fixed route에서는 runtime 또는 memory 병목이 남아 있다.</p>
+<p class="note">주의: VarDrop 논문 표는 test 성능/논문 하드웨어 기준이고, 현재 Ours 성능은 selected route test 실행 전에는 pending으로 표시된다. 효율 표는 VarDrop 논문 하드웨어 숫자를 쓰지 않고 현재 저장소의 local iTransformer validation 로그만 기준으로 비교했다. 이 Codex 세션에서는 CUDA가 보이지 않고 escalated GPU 실행도 정책상 거절되어 test 재실행과 CUDA median profile을 완료하지 못했다.</p>
+</section>
+<section>
+<h2>필요한 추가 실행</h2>
+<pre>cd /home/yulim/MSH/patch-latent
+bash iTransformer/scripts/run_vardrop_performance_table.sh
+
+# 최종 3-seed 표까지 만들 때
+SEEDS="2021 2022 2023" bash iTransformer/scripts/run_vardrop_performance_table.sh
+
+# 별도 CUDA median efficiency profile
+cd /home/yulim/MSH/patch-latent/iTransformer
+/home/yulim/anaconda3/envs/patchtst/bin/python -u scripts/profile_coverage_fallback_efficiency.py --device cuda --datasets Electricity Traffic Weather Solar --pred_lens 96 --output_csv ./results/coverage_fallback_efficiency_profile_vardrop96.csv --warmup 5 --repeat 15 --train_repeat 7</pre>
+</section>
+</body>
+</html>

@@ -125,19 +125,46 @@ class DataEmbedding(nn.Module):
 
 
 class DataEmbedding_inverted(nn.Module):
-    def __init__(self, c_in, d_model, embed_type='fixed', freq='h', dropout=0.1):
+    def __init__(self, c_in, d_model, embed_type='fixed', freq='h', dropout=0.1, split_factor=1):
         super(DataEmbedding_inverted, self).__init__()
+        self.c_in = int(c_in)
+        self.d_model = int(d_model)
+        self.split_factor = int(split_factor)
+        if self.split_factor < 1:
+            raise ValueError('split_factor must be at least 1')
+        if self.split_factor > 1 and self.c_in % self.split_factor != 0:
+            raise ValueError('c_in must be divisible by split_factor')
         self.value_embedding = nn.Linear(c_in, d_model)
+        if self.split_factor > 1:
+            self.segment_len = self.c_in // self.split_factor
+            self.segment_value_embedding = nn.Linear(self.segment_len, d_model)
+            self.segment_pos_embedding = nn.Parameter(torch.empty(self.split_factor, d_model))
+            nn.init.normal_(self.segment_pos_embedding, std=0.02)
         self.dropout = nn.Dropout(p=dropout)
 
     def forward(self, x, x_mark):
-        x = x.permute(0, 2, 1)
-        # x: [Batch Variate Time]
-        if x_mark is None:
-            x = self.value_embedding(x)
-        else:
-            # the potential to take covariates (e.g. timestamps) as tokens
-            x = self.value_embedding(torch.cat([x, x_mark.permute(0, 2, 1)], 1)) 
-        # x: [Batch Variate d_model]
-        return self.dropout(x)
+        if self.split_factor == 1:
+            x = x.permute(0, 2, 1)
+            # x: [Batch Variate Time]
+            if x_mark is None:
+                x = self.value_embedding(x)
+            else:
+                # the potential to take covariates (e.g. timestamps) as tokens
+                x = self.value_embedding(torch.cat([x, x_mark.permute(0, 2, 1)], 1))
+            # x: [Batch Variate d_model]
+            return self.dropout(x)
 
+        batch_size, seq_len, num_variates = x.shape
+        if seq_len != self.c_in:
+            raise ValueError('x has seq_len {}, but embedding expects {}'.format(seq_len, self.c_in))
+        x = x.permute(0, 2, 1).contiguous()
+        # [Batch, Variate, Time] -> [Batch, Variate, Segment, SegmentTime]
+        x = x.view(batch_size, num_variates, self.split_factor, self.segment_len)
+        x = self.segment_value_embedding(x)
+        x = x + self.segment_pos_embedding.view(1, 1, self.split_factor, self.d_model)
+        x = x.reshape(batch_size, num_variates * self.split_factor, self.d_model)
+
+        if x_mark is not None:
+            extra_tokens = self.value_embedding(x_mark.permute(0, 2, 1).contiguous())
+            x = torch.cat([x, extra_tokens], dim=1)
+        return self.dropout(x)

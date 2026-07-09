@@ -129,3 +129,31 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Experiment artifacts
+checkpoints/
+dataset
+wandb/
+test_results/
+result_long_term_forecast.txt
+*.lock
+
+# Keep CSV/HTML/MD reports trackable, but ignore bulky run tensors and figures by default.
+results/**/*.npy
+results/**/*.npz
+results/**/*.pt
+results/**/*.pth
+results/**/*.png
+results/**/*.jpg
+results/**/*.jpeg
+results/**/*.pdf
+results/**/*.svg
+results/**/*.pkl
+results/*/
+!results/cycle_loss_analysis/
+!results/sparse_attention_wcomp/
+!results/sparse_attention_wcomp/smoke/
+!results/grouped_soft_representative/
+!results/grouped_soft_representative/smoke/
+results/sparse_attention_wcomp/plots/
+results/sparse_attention_wcomp/smoke/plots/

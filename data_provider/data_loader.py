@@ -380,14 +380,36 @@ class Dataset_Solar(Dataset):
 
     def __read_data__(self):
         self.scaler = StandardScaler()
-        df_raw = []
-        with open(os.path.join(self.root_path, self.data_path), "r", encoding='utf-8') as f:
-            for line in f.readlines():
-                line = line.strip('\n').split(',')
-                data_line = np.stack([float(i) for i in line])
-                df_raw.append(data_line)
-        df_raw = np.stack(df_raw, 0)
-        df_raw = pd.DataFrame(df_raw)
+        data_file = os.path.join(self.root_path, self.data_path)
+        with open(data_file, "r", encoding='utf-8') as f:
+            first_line = f.readline().strip('\n').split(',')
+
+        try:
+            [float(i) for i in first_line]
+            has_header = False
+        except ValueError:
+            has_header = True
+
+        if has_header:
+            df_raw = pd.read_csv(data_file)
+            date_cols = [col for col in df_raw.columns if str(col).lower() in ('date', 'datetime')]
+            if date_cols:
+                date_col = date_cols[0]
+                parsed_dates = pd.to_datetime(df_raw[date_col], errors='coerce', dayfirst=True)
+                if parsed_dates.notna().any():
+                    df_raw = df_raw.assign(_parsed_date=parsed_dates).sort_values('_parsed_date')
+                    df_raw = df_raw.drop(columns=['_parsed_date'])
+                df_raw = df_raw.drop(columns=date_cols)
+            df_raw = df_raw.apply(pd.to_numeric, errors='coerce')
+            df_raw = df_raw.fillna(method='ffill', limit=len(df_raw)).fillna(method='bfill', limit=len(df_raw))
+        else:
+            rows = []
+            with open(data_file, "r", encoding='utf-8') as f:
+                for line in f.readlines():
+                    line = line.strip('\n').split(',')
+                    data_line = np.stack([float(i) for i in line])
+                    rows.append(data_line)
+            df_raw = pd.DataFrame(np.stack(rows, 0))
 
         num_train = int(len(df_raw) * 0.7)
         num_test = int(len(df_raw) * 0.2)
@@ -418,7 +440,7 @@ class Dataset_Solar(Dataset):
         seq_x = self.data_x[s_begin:s_end]
         seq_y = self.data_y[r_begin:r_end]
         seq_x_mark = torch.zeros((seq_x.shape[0], 1))
-        seq_y_mark = torch.zeros((seq_x.shape[0], 1))
+        seq_y_mark = torch.zeros((seq_y.shape[0], 1))
 
         return seq_x, seq_y, seq_x_mark, seq_y_mark
 

@@ -3,8 +3,14 @@ import torch.nn as nn
 import numpy as np
 from math import sqrt
 from utils.masking import TriangularCausalMask, ProbMask
-from reformer_pytorch import LSHSelfAttention
-from einops import rearrange
+try:
+    from reformer_pytorch import LSHSelfAttention
+except ImportError:
+    LSHSelfAttention = None
+try:
+    from einops import rearrange
+except ImportError:
+    rearrange = None
 
 
 # Code implementation from https://github.com/thuml/Flowformer
@@ -52,6 +58,11 @@ class FlashAttention(nn.Module):
         self.dropout = nn.Dropout(attention_dropout)
 
     def flash_attention_forward(self, Q, K, V, mask=None):
+        if rearrange is None:
+            raise ImportError(
+                'einops is required only when using FlashAttention/Flashformer. '
+                'Install it with: pip install einops'
+            )
         BLOCK_SIZE = 32
         NEG_INF = -1e10  # -infinity
         EPSILON = 1e-10
@@ -305,6 +316,11 @@ class ReformerLayer(nn.Module):
                  d_values=None, causal=False, bucket_size=4, n_hashes=4):
         super().__init__()
         self.bucket_size = bucket_size
+        if LSHSelfAttention is None:
+            raise ImportError(
+                'reformer_pytorch is required only when using Reformer/iReformer models. '
+                'Install it with: pip install reformer-pytorch==1.4.4'
+            )
         self.attn = LSHSelfAttention(
             dim=d_model,
             heads=n_heads,
@@ -328,4 +344,3 @@ class ReformerLayer(nn.Module):
         B, N, C = queries.shape
         queries = self.attn(self.fit_length(queries))[:, :N, :]
         return queries, None
-
