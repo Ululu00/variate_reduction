@@ -7,7 +7,9 @@ import numpy as np
 import csv
 import fcntl
 import os
+import shlex
 import subprocess
+import sys
 import time
 
 
@@ -16,6 +18,13 @@ CSV_COLUMNS = [
     'method_family', 'method_name',
     'selection_id', 'selected_recipe', 'manual_override',
     'variate_reduction_type', 'variate_expansion_type', 'expansion_weight_source',
+    'variate_backbone_mode', 'sender_mass_correction',
+    'sender_mass_mode', 'sender_mass_power_cap', 'sender_mass_power_init',
+    'sender_mass_learning_rate',
+    'sender_mass_learned_power_min', 'sender_mass_learned_power_mean',
+    'sender_mass_learned_power_max',
+    'sender_mass_similarity_power', 'sender_mass_similarity_source',
+    'sender_effective_mass_min', 'sender_effective_mass_mean', 'sender_effective_mass_max',
     'variate_decode_stage', 'loss_variant',
     'forecast_loss_type', 'huber_delta',
     'compute_reducer_aux_losses',
@@ -30,10 +39,13 @@ CSV_COLUMNS = [
     'backbone_residual_gate_init', 'backbone_residual_gate_type',
     'backbone_residual_gate', 'backbone_residual_gate_abs_mean', 'backbone_residual_gate_max',
     'local_temporal_rank',
+    'neighbor_cross_branch', 'neighbor_cross_rank', 'neighbor_cross_gate_init', 'neighbor_cross_gate',
+    'neighbor_map_path',
     'zero_init_projector', 'skip_backbone',
     'k_selection_mode', 'k_ratio_denominator', 'target_k_value',
     'variate_anchor_map_path',
     'original_encoder_tokens', 'reduced_encoder_tokens', 'num_extra_tokens',
+    'attention_query_tokens', 'attention_kv_tokens',
     'token_ratio', 'token_reduction_percent',
     'attention_score_ratio', 'attention_score_reduction_percent',
     'eval_split', 'skip_epoch_test_eval',
@@ -41,10 +53,14 @@ CSV_COLUMNS = [
     'orthogonal_loss_weight', 'reconstruction_loss_weight',
     'coverage_loss_weight', 'assignment_entropy_loss_weight',
     'wcomp_entropy_loss_weight', 'group_attention_entropy_loss_weight',
-    'group_attention_entropy_target', 'lambda_orth', 'lambda_entropy',
+    'expansion_weight_l2_loss_weight',
+    'group_attention_entropy_target', 'lambda_orth', 'lambda_entropy', 'lambda_expansion_weight_l2',
     'use_cycle_slot_loss', 'cycle_loss_weight', 'cycle_warmup_ratio',
     'cycle_topr', 'cycle_topr_multiplier', 'cycle_b_norm', 'cycle_eps',
     'export_slot_diagnostics',
+    'within_group_residual', 'within_group_residual_gate_init',
+    'within_group_residual_rank', 'within_group_residual_mode',
+    'within_group_residual_gate_mode', 'within_group_residual_gate',
     'cycle_loss', 'weighted_cycle_loss', 'cycle_current_weight',
     'mae_loss_weight',
     'train_time_sec', 'train_iter_count', 'avg_train_iter_time_sec', 'throughput_iter_per_sec',
@@ -65,11 +81,13 @@ CSV_COLUMNS = [
     'cycle_slot_overlap', 'cycle_topr_size',
     'residual_gate_mean', 'residual_gate_abs_mean', 'residual_gate_max', 'hybrid_linear_gate',
     'local_temporal_branch', 'local_temporal_init', 'local_temporal_gate_init', 'local_temporal_gate',
+    'group_residual_gate_init', 'group_residual_gate', 'group_residual_coeff_abs_mean',
+    'group_residual_period', 'group_residual_season_gate_init', 'group_residual_season_gate',
     'output_calibration', 'output_calibration_scale_abs_mean', 'output_calibration_bias_abs_mean',
     'status', 'timestamp', 'git_commit', 'git_dirty', 'error', 'command', 'returncode',
     'gpu', 'cuda_visible_devices', 'data', 'root_path', 'data_path', 'target', 'freq',
     'seed', 'itr', 'model', 'model_id', 'setting',
-    'seq_len', 'label_len', 'e_layers', 'd_model', 'd_ff',
+    'seq_len', 'label_len', 'e_layers', 'd_model', 'n_heads', 'd_ff',
     'batch_size', 'learning_rate', 'train_epochs', 'patience', 'num_workers',
     'use_norm', 'checkpoint_dir', 'result_dir', 'weight_matrix_dir', 'slot_diagnostic_dir', 'plot_dir',
 ]
@@ -181,6 +199,23 @@ def model_metadata(model, args):
     return {
         'variate_token_split_factor': split_factor,
         'variate_decode_stage': getattr(args, 'variate_decode_stage', 'feature'),
+        'variate_backbone_mode': getattr(args, 'variate_backbone_mode', 'bottleneck'),
+        'sender_mass_correction': getattr(args, 'sender_mass_correction', False),
+        'sender_mass_mode': getattr(args, 'sender_mass_mode', 'fixed'),
+        'sender_mass_power_cap': getattr(args, 'sender_mass_power_cap', 64.0),
+        'sender_mass_power_init': getattr(args, 'sender_mass_power_init', 16.0),
+        'sender_mass_learned_power_min': '',
+        'sender_mass_learned_power_mean': '',
+        'sender_mass_learned_power_max': '',
+        'sender_mass_similarity_power': getattr(args, 'sender_mass_similarity_power', 0.0),
+        'sender_mass_similarity_source': (
+            'assigned_abs_corr'
+            if (
+                getattr(args, 'sender_mass_similarity_power', 0.0) > 0.0
+                or getattr(args, 'sender_mass_mode', 'fixed') != 'fixed'
+            )
+            else ('group_count' if getattr(args, 'sender_mass_correction', False) else 'none')
+        ),
         'original_variate_tokens': args.enc_in,
         'target_variate_tokens': args.enc_in,
         'source_variate_tokens': source_variate_tokens,
@@ -188,6 +223,12 @@ def model_metadata(model, args):
         'num_extra_tokens': 0,
         'original_encoder_tokens': source_variate_tokens,
         'reduced_encoder_tokens': reduced_k,
+        'attention_query_tokens': (
+            source_variate_tokens
+            if getattr(args, 'variate_backbone_mode', 'bottleneck') == 'layerwise_sender'
+            else reduced_k
+        ),
+        'attention_kv_tokens': reduced_k,
         'logical_k': reduced_k,
         'executed_k': reduced_k,
         'k_budget_max': strict_k_budget(args.enc_in)[0],
@@ -209,6 +250,11 @@ def model_metadata(model, args):
         'w_eff_density': 0.0,
         'decoder_residual_gate_init': getattr(args, 'decoder_residual_gate_init', 0.0),
         'local_temporal_rank': getattr(args, 'local_temporal_rank', 0),
+        'neighbor_cross_branch': getattr(args, 'neighbor_cross_branch', 'none'),
+        'neighbor_cross_rank': getattr(args, 'neighbor_cross_rank', 0),
+        'neighbor_cross_gate_init': getattr(args, 'neighbor_cross_gate_init', 0.0),
+        'neighbor_cross_gate': 0.0,
+        'neighbor_map_path': getattr(args, 'neighbor_map_path', ''),
         'zero_init_projector': getattr(args, 'zero_init_projector', False),
         'skip_backbone': getattr(args, 'skip_backbone', False),
         'residual_gate_mean': 0.0,
@@ -217,6 +263,8 @@ def model_metadata(model, args):
         'hybrid_linear_gate': 0.0,
         'local_temporal_branch': getattr(args, 'local_temporal_branch', 'none'),
         'local_temporal_gate': 0.0,
+        'group_residual_gate': 0.0,
+        'group_residual_coeff_abs_mean': 0.0,
     }
 
 
@@ -568,10 +616,21 @@ def append_success_row(args, setting, metrics, elapsed_sec, itr_index, model, tr
     token_reduction_percent = ''
     attention_score_ratio = ''
     attention_score_reduction_percent = ''
+    attention_query_tokens = metadata.get('attention_query_tokens', reduced_encoder_tokens)
+    attention_kv_tokens = metadata.get('attention_kv_tokens', reduced_encoder_tokens)
     if original_encoder_tokens not in ('', 0) and reduced_encoder_tokens != '':
         token_ratio = float(reduced_encoder_tokens) / float(original_encoder_tokens)
         token_reduction_percent = 100.0 * (1.0 - token_ratio)
-        attention_score_ratio = token_ratio ** 2
+    if (
+        original_encoder_tokens not in ('', 0)
+        and attention_query_tokens != ''
+        and attention_kv_tokens != ''
+    ):
+        attention_score_ratio = (
+            float(attention_query_tokens)
+            * float(attention_kv_tokens)
+            / float(original_encoder_tokens) ** 2
+        )
         attention_score_reduction_percent = 100.0 * (1.0 - attention_score_ratio)
     is_baseline = args.variate_reduction_type == 'none'
     method_family = getattr(args, 'method_family', '') or ('iTransformer' if is_baseline else args.variate_reduction_type)
@@ -602,6 +661,38 @@ def append_success_row(args, setting, metrics, elapsed_sec, itr_index, model, tr
         'manual_override': getattr(args, 'manual_override', '0'),
         'variate_reduction_type': args.variate_reduction_type,
         'variate_expansion_type': args.variate_expansion_type,
+        'variate_backbone_mode': metadata.get(
+            'variate_backbone_mode', getattr(args, 'variate_backbone_mode', 'bottleneck')
+        ),
+        'sender_mass_correction': metadata.get(
+            'sender_mass_correction', getattr(args, 'sender_mass_correction', False)
+        ),
+        'sender_mass_mode': metadata.get(
+            'sender_mass_mode', getattr(args, 'sender_mass_mode', 'fixed')
+        ),
+        'sender_mass_power_cap': metadata.get(
+            'sender_mass_power_cap', getattr(args, 'sender_mass_power_cap', 64.0)
+        ),
+        'sender_mass_power_init': metadata.get(
+            'sender_mass_power_init', getattr(args, 'sender_mass_power_init', 16.0)
+        ),
+        'sender_mass_learning_rate': getattr(args, 'sender_mass_learning_rate', 0.0),
+        'sender_mass_learned_power_min': metadata.get(
+            'sender_mass_learned_power_min', ''
+        ),
+        'sender_mass_learned_power_mean': metadata.get(
+            'sender_mass_learned_power_mean', ''
+        ),
+        'sender_mass_learned_power_max': metadata.get(
+            'sender_mass_learned_power_max', ''
+        ),
+        'sender_mass_similarity_power': metadata.get(
+            'sender_mass_similarity_power', getattr(args, 'sender_mass_similarity_power', 0.0)
+        ),
+        'sender_mass_similarity_source': metadata.get('sender_mass_similarity_source', ''),
+        'sender_effective_mass_min': metadata.get('sender_effective_mass_min', ''),
+        'sender_effective_mass_mean': metadata.get('sender_effective_mass_mean', ''),
+        'sender_effective_mass_max': metadata.get('sender_effective_mass_max', ''),
         'expansion_weight_source': expansion_weight_source(
             args.variate_reduction_type, args.variate_expansion_type
         ),
@@ -645,6 +736,11 @@ def append_success_row(args, setting, metrics, elapsed_sec, itr_index, model, tr
         'backbone_residual_gate_abs_mean': metadata.get('backbone_residual_gate_abs_mean', 1.0),
         'backbone_residual_gate_max': metadata.get('backbone_residual_gate_max', 1.0),
         'local_temporal_rank': metadata.get('local_temporal_rank', getattr(args, 'local_temporal_rank', 0)),
+        'neighbor_cross_branch': getattr(args, 'neighbor_cross_branch', 'none'),
+        'neighbor_cross_rank': getattr(args, 'neighbor_cross_rank', 0),
+        'neighbor_cross_gate_init': getattr(args, 'neighbor_cross_gate_init', 0.0),
+        'neighbor_cross_gate': metadata.get('neighbor_cross_gate', 0.0),
+        'neighbor_map_path': getattr(args, 'neighbor_map_path', ''),
         'zero_init_projector': metadata.get('zero_init_projector', getattr(args, 'zero_init_projector', False)),
         'skip_backbone': metadata.get('skip_backbone', getattr(args, 'skip_backbone', False)),
         'k_selection_mode': args.k_selection_mode,
@@ -654,6 +750,8 @@ def append_success_row(args, setting, metrics, elapsed_sec, itr_index, model, tr
         'original_encoder_tokens': metadata.get('original_encoder_tokens', ''),
         'reduced_encoder_tokens': metadata.get('reduced_encoder_tokens', ''),
         'num_extra_tokens': metadata.get('num_extra_tokens', ''),
+        'attention_query_tokens': attention_query_tokens,
+        'attention_kv_tokens': attention_kv_tokens,
         'token_ratio': token_ratio,
         'token_reduction_percent': token_reduction_percent,
         'attention_score_ratio': attention_score_ratio,
@@ -670,6 +768,7 @@ def append_success_row(args, setting, metrics, elapsed_sec, itr_index, model, tr
         'coverage_loss_weight': args.coverage_loss_weight,
         'assignment_entropy_loss_weight': args.assignment_entropy_loss_weight,
         'wcomp_entropy_loss_weight': getattr(args, 'wcomp_entropy_loss_weight', 0.0),
+        'expansion_weight_l2_loss_weight': getattr(args, 'expansion_weight_l2_loss_weight', 0.0),
         'group_attention_entropy_loss_weight': '' if is_baseline else getattr(
             args, 'group_attention_entropy_loss_weight', 0.0
         ),
@@ -678,6 +777,7 @@ def append_success_row(args, setting, metrics, elapsed_sec, itr_index, model, tr
         ),
         'lambda_orth': args.orthogonal_loss_weight,
         'lambda_entropy': '' if is_baseline else getattr(args, 'wcomp_entropy_loss_weight', 0.0),
+        'lambda_expansion_weight_l2': '' if is_baseline else getattr(args, 'expansion_weight_l2_loss_weight', 0.0),
         'use_cycle_slot_loss': getattr(args, 'use_cycle_slot_loss', False),
         'cycle_loss_weight': getattr(args, 'cycle_loss_weight', 0.0),
         'cycle_warmup_ratio': getattr(args, 'cycle_warmup_ratio', 0.0),
@@ -716,6 +816,21 @@ def append_success_row(args, setting, metrics, elapsed_sec, itr_index, model, tr
         'local_temporal_init': getattr(args, 'local_temporal_init', ''),
         'local_temporal_gate_init': getattr(args, 'local_temporal_gate_init', ''),
         'local_temporal_gate': metadata.get('local_temporal_gate', 0.0),
+        'group_residual_gate_init': getattr(args, 'group_residual_gate_init', 1.0),
+        'group_residual_period': getattr(args, 'group_residual_period', 0),
+        'group_residual_season_gate_init': getattr(args, 'group_residual_season_gate_init', 0.1),
+        'group_residual_season_gate': metadata.get('group_residual_season_gate', 0.0),
+        'group_residual_gate': metadata.get('group_residual_gate', 0.0),
+        'group_residual_coeff_abs_mean': metadata.get('group_residual_coeff_abs_mean', 0.0),
+        'within_group_residual': '' if is_baseline else getattr(args, 'within_group_residual', False),
+        'within_group_residual_gate_init': '' if is_baseline else getattr(args, 'within_group_residual_gate_init', 0.0),
+        'within_group_residual_rank': '' if is_baseline else getattr(args, 'within_group_residual_rank', 0),
+        'within_group_residual_mode': '' if is_baseline else metadata.get(
+            'within_group_residual_mode',
+            getattr(args, 'within_group_residual_mode', 'projection'),
+        ),
+        'within_group_residual_gate_mode': '' if is_baseline else getattr(args, 'within_group_residual_gate_mode', 'scalar'),
+        'within_group_residual_gate': metadata.get('within_group_residual_gate', 0.0),
         'output_calibration': metadata.get('output_calibration', getattr(args, 'output_calibration', 'none')),
         'output_calibration_scale_abs_mean': metadata.get('output_calibration_scale_abs_mean', 1.0),
         'output_calibration_bias_abs_mean': metadata.get('output_calibration_bias_abs_mean', 0.0),
@@ -724,7 +839,7 @@ def append_success_row(args, setting, metrics, elapsed_sec, itr_index, model, tr
         'git_commit': git_value(['git', 'rev-parse', 'HEAD']),
         'git_dirty': git_dirty(),
         'error': '',
-        'command': '',
+        'command': ' '.join(shlex.quote(part) for part in sys.argv),
         'returncode': 0,
         'gpu': args.gpu,
         'cuda_visible_devices': os.environ.get('CUDA_VISIBLE_DEVICES', ''),
@@ -742,6 +857,7 @@ def append_success_row(args, setting, metrics, elapsed_sec, itr_index, model, tr
         'label_len': args.label_len,
         'e_layers': args.e_layers,
         'd_model': args.d_model,
+        'n_heads': args.n_heads,
         'd_ff': args.d_ff,
         'batch_size': args.batch_size,
         'learning_rate': args.learning_rate,
@@ -977,6 +1093,15 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, default=32, help='batch size of train input data')
     parser.add_argument('--patience', type=int, default=3, help='early stopping patience')
     parser.add_argument('--learning_rate', type=float, default=0.0001, help='optimizer learning rate')
+    parser.add_argument(
+        '--sender_mass_learning_rate',
+        type=float,
+        default=0.0,
+        help=(
+            'Dedicated Adam learning rate for sender_mass_power_theta; 0 uses '
+            'the base learning rate and preserves the original one-group optimizer.'
+        ),
+    )
     parser.add_argument('--des', type=str, default='test', help='exp description')
     parser.add_argument('--loss', type=str, default='MSE', help='loss function')
     parser.add_argument('--forecast_loss_type', type=str, default='mse', choices=['mse', 'smooth_l1', 'huber'])
@@ -1063,9 +1188,54 @@ if __name__ == '__main__':
                             'query_decoder_scalar_residual',
                             'query_decoder_variate_residual',
                             'token_query_decoder',
+                            'masked_token_query_decoder',
                         ])
     parser.add_argument('--variate_decode_stage', type=str, default='feature',
                         choices=['feature', 'forecast'])
+    parser.add_argument(
+        '--variate_backbone_mode',
+        type=str,
+        default='bottleneck',
+        choices=['bottleneck', 'layerwise_sender'],
+        help='Use reduced tokens as a bottleneck, or retain all query states and restrict layerwise K/V senders.',
+    )
+    parser.add_argument(
+        '--sender_mass_correction',
+        type=str2bool,
+        default=False,
+        help='Add log group multiplicity to selected-sender attention logits.',
+    )
+    parser.add_argument(
+        '--sender_mass_mode',
+        type=str,
+        default='fixed',
+        choices=['fixed', 'learned_global', 'learned_layer_head'],
+        help=(
+            'Use the fixed multiplicity rule, one learned similarity power, or '
+            'a separate learned power for every encoder layer and attention head.'
+        ),
+    )
+    parser.add_argument(
+        '--sender_mass_power_cap',
+        type=float,
+        default=64.0,
+        help='Upper bound in p=cap*sigmoid(theta) for learned sender-mass modes.',
+    )
+    parser.add_argument(
+        '--sender_mass_power_init',
+        type=float,
+        default=16.0,
+        help='Initial p for learned sender-mass modes; must lie strictly inside (0, cap).',
+    )
+    parser.add_argument(
+        '--sender_mass_similarity_power',
+        type=float,
+        default=0.0,
+        help=(
+            'Use sum(clip(assigned_abs_corr,0,1)^p) as sender mass when p>0; '
+            'p=0 exactly recovers raw group-count correction.'
+        ),
+    )
     parser.add_argument('--expansion_temperature', type=float, default=1.0)
     parser.add_argument('--expansion_topk', type=int, default=0)
     parser.add_argument('--wcomp_normalization', type=str, default='softmax', choices=['softmax', 'entmax15'])
@@ -1076,12 +1246,18 @@ if __name__ == '__main__':
     parser.add_argument('--sparse_expand_topk', type=int, default=0)
     parser.add_argument('--decoder_residual_gate_init', type=float, default=0.0)
     parser.add_argument('--backbone_residual_gate_init', type=float, default=1.0)
-    parser.add_argument('--backbone_residual_gate_type', type=str, default='scalar', choices=['scalar', 'variate'])
+    parser.add_argument(
+        '--backbone_residual_gate_type',
+        type=str,
+        default='scalar',
+        choices=['scalar', 'variate', 'scalar_plus_variate'],
+    )
     parser.add_argument('--orthogonal_loss_weight', type=float, default=0.0)
     parser.add_argument('--reconstruction_loss_weight', type=float, default=0.0)
     parser.add_argument('--coverage_loss_weight', type=float, default=0.0)
     parser.add_argument('--assignment_entropy_loss_weight', type=float, default=0.0)
     parser.add_argument('--wcomp_entropy_loss_weight', type=float, default=0.0)
+    parser.add_argument('--expansion_weight_l2_loss_weight', type=float, default=0.0)
     parser.add_argument('--group_attention_entropy_loss_weight', type=float, default=0.0)
     parser.add_argument('--group_attention_entropy_target', type=float, default=0.35)
     parser.add_argument('--use_cycle_slot_loss', type=str2bool, default=False)
@@ -1092,6 +1268,21 @@ if __name__ == '__main__':
     parser.add_argument('--cycle_b_norm', type=str, default='row_l1', choices=['row_l1'])
     parser.add_argument('--cycle_eps', type=float, default=1e-8)
     parser.add_argument('--export_slot_diagnostics', type=str2bool, default=False)
+    parser.add_argument('--within_group_residual', type=str2bool, default=False)
+    parser.add_argument('--within_group_residual_gate_init', type=float, default=0.0)
+    parser.add_argument('--within_group_residual_rank', type=int, default=0)
+    parser.add_argument(
+        '--within_group_residual_mode',
+        type=str,
+        default='projection',
+        choices=['projection', 'attention', 'attention_context'],
+    )
+    parser.add_argument(
+        '--within_group_residual_gate_mode',
+        type=str,
+        default='scalar',
+        choices=['scalar', 'variate'],
+    )
     # Deprecated generation-only loss flags are accepted as zero for old shell
     # commands, but non-zero values are rejected during argument validation.
     parser.add_argument('--linear_coverage_loss_weight', type=float, default=0.0, help=argparse.SUPPRESS)
@@ -1105,10 +1296,17 @@ if __name__ == '__main__':
     parser.add_argument('--mae_loss_weight', type=float, default=0.0)
     parser.add_argument('--variate_token_split_factor', type=int, default=1)
     parser.add_argument('--enforce_k_budget', type=str2bool, default=True)
-    parser.add_argument('--local_temporal_branch', type=str, default='none', choices=['none', 'linear', 'nlinear', 'nlinear_affine', 'nlinear_lowrank', 'nlinear_lowrank_affine', 'nlinear_decomp', 'nlinear_decomp_affine', 'anchor_residual_nlinear', 'anchor_residual_nlinear_affine', 'anchor_delta_nlinear', 'anchor_delta_nlinear_affine', 'anchor_mask_delta_nlinear', 'anchor_mask_delta_nlinear_affine', 'anchor_group_nlinear', 'anchor_group_nlinear_affine', 'nlinear_group', 'nlinear_group_affine', 'lowrank_linear', 'persistence', 'persistence_gate'])
+    parser.add_argument('--local_temporal_branch', type=str, default='none', choices=['none', 'linear', 'nlinear', 'nlinear_affine', 'nlinear_affine_group_residual', 'nlinear_affine_anchor_group_residual', 'nlinear_lowrank', 'nlinear_lowrank_affine', 'nlinear_decomp', 'nlinear_decomp_affine', 'anchor_residual_nlinear', 'anchor_residual_nlinear_affine', 'anchor_delta_nlinear', 'anchor_delta_nlinear_affine', 'anchor_mask_delta_nlinear', 'anchor_mask_delta_nlinear_affine', 'anchor_group_nlinear', 'anchor_group_nlinear_affine', 'nlinear_group', 'nlinear_group_affine', 'lowrank_linear', 'persistence', 'persistence_gate'])
     parser.add_argument('--local_temporal_init', type=str, default='persistence', choices=['persistence', 'zero'])
     parser.add_argument('--local_temporal_gate_init', type=float, default=1.0)
     parser.add_argument('--local_temporal_rank', type=int, default=4)
+    parser.add_argument('--group_residual_gate_init', type=float, default=1.0)
+    parser.add_argument('--group_residual_period', type=int, default=0)
+    parser.add_argument('--group_residual_season_gate_init', type=float, default=0.1)
+    parser.add_argument('--neighbor_cross_branch', type=str, default='none', choices=['none', 'lowrank_nlinear'])
+    parser.add_argument('--neighbor_map_path', type=str, default='')
+    parser.add_argument('--neighbor_cross_rank', type=int, default=4)
+    parser.add_argument('--neighbor_cross_gate_init', type=float, default=1.0)
     parser.add_argument('--zero_init_projector', type=str2bool, default=False)
     parser.add_argument('--skip_backbone', type=str2bool, default=False)
     parser.add_argument('--output_calibration', type=str, default='none', choices=['none', 'variate_affine'])
@@ -1148,6 +1346,68 @@ if __name__ == '__main__':
 
     if args.variate_reduction_type != 'none' and args.reduced_variate_k <= 0:
         raise ValueError('--reduced_variate_k must be positive when variate_reduction_type is not none')
+    if args.variate_backbone_mode == 'layerwise_sender':
+        if args.model != 'iTransformer':
+            raise ValueError('--variate_backbone_mode=layerwise_sender currently supports only --model iTransformer')
+        if args.variate_reduction_type != 'variate_anchor_selection':
+            raise ValueError(
+                '--variate_backbone_mode=layerwise_sender currently requires '
+                '--variate_reduction_type=variate_anchor_selection'
+            )
+        if args.variate_decode_stage != 'feature':
+            raise ValueError('--variate_backbone_mode=layerwise_sender requires --variate_decode_stage=feature')
+    elif args.sender_mass_correction:
+        raise ValueError('--sender_mass_correction requires --variate_backbone_mode=layerwise_sender')
+    if not np.isfinite(args.sender_mass_similarity_power) or args.sender_mass_similarity_power < 0.0:
+        raise ValueError('--sender_mass_similarity_power must be finite and non-negative')
+    if args.sender_mass_similarity_power > 0.0 and not args.sender_mass_correction:
+        raise ValueError(
+            '--sender_mass_similarity_power > 0 requires --sender_mass_correction True'
+        )
+    if (
+        not np.isfinite(args.sender_mass_learning_rate)
+        or args.sender_mass_learning_rate < 0.0
+    ):
+        raise ValueError('--sender_mass_learning_rate must be finite and non-negative')
+    if args.sender_mass_learning_rate > 0.0 and args.sender_mass_mode == 'fixed':
+        raise ValueError(
+            '--sender_mass_learning_rate > 0 requires a learned --sender_mass_mode'
+        )
+    if args.sender_mass_learning_rate > 0.0 and (
+        not np.isfinite(args.learning_rate) or args.learning_rate <= 0.0
+    ):
+        raise ValueError(
+            'positive --sender_mass_learning_rate requires a finite positive '
+            '--learning_rate'
+        )
+    if args.sender_mass_mode != 'fixed':
+        if not args.sender_mass_correction:
+            raise ValueError(
+                '--sender_mass_mode={} requires --sender_mass_correction True'.format(
+                    args.sender_mass_mode
+                )
+            )
+        if args.variate_backbone_mode != 'layerwise_sender':
+            raise ValueError(
+                'learned --sender_mass_mode requires '
+                '--variate_backbone_mode=layerwise_sender'
+            )
+        if args.sender_mass_similarity_power != 0.0:
+            raise ValueError(
+                'learned --sender_mass_mode cannot be combined with '
+                '--sender_mass_similarity_power; use --sender_mass_power_init'
+            )
+        if not np.isfinite(args.sender_mass_power_cap) or args.sender_mass_power_cap <= 0.0:
+            raise ValueError('--sender_mass_power_cap must be finite and positive')
+        if (
+            not np.isfinite(args.sender_mass_power_init)
+            or args.sender_mass_power_init <= 0.0
+            or args.sender_mass_power_init >= args.sender_mass_power_cap
+        ):
+            raise ValueError(
+                '--sender_mass_power_init must be finite and strictly between 0 and '
+                '--sender_mass_power_cap'
+            )
     if args.cycle_loss_weight < 0.0:
         raise ValueError('--cycle_loss_weight must be non-negative')
     if args.cycle_warmup_ratio < 0.0 or args.cycle_warmup_ratio > 1.0:
@@ -1206,6 +1466,7 @@ if __name__ == '__main__':
         args.coverage_loss_weight = 0.0
         args.assignment_entropy_loss_weight = 0.0
         args.wcomp_entropy_loss_weight = 0.0
+        args.expansion_weight_l2_loss_weight = 0.0
         args.group_attention_entropy_loss_weight = 0.0
         args.use_cycle_slot_loss = False
         args.cycle_loss_weight = 0.0
