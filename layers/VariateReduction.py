@@ -29,6 +29,7 @@ class VariateReducer(nn.Module):
         wcomp_normalization='softmax',
         entmax_alpha=1.5,
         use_wcomp_entropy_loss=False,
+        use_expansion_weight_l2_loss=False,
         use_group_attention_entropy_loss=False,
         group_attention_entropy_target=0.35,
         use_cycle_slot_loss=False,
@@ -37,6 +38,11 @@ class VariateReducer(nn.Module):
         cycle_b_norm='row_l1',
         cycle_eps=1e-8,
         export_slot_diagnostics=False,
+        within_group_residual=False,
+        within_group_residual_gate_init=0.0,
+        within_group_residual_rank=0,
+        within_group_residual_mode='projection',
+        within_group_residual_gate_mode='scalar',
     ):
         super().__init__()
         self.reduction_type = reduction_type
@@ -60,6 +66,7 @@ class VariateReducer(nn.Module):
         self.wcomp_normalization = str(wcomp_normalization or 'softmax')
         self.entmax_alpha = float(entmax_alpha)
         self.use_wcomp_entropy_loss = bool(use_wcomp_entropy_loss)
+        self.use_expansion_weight_l2_loss = bool(use_expansion_weight_l2_loss)
         self.use_group_attention_entropy_loss = bool(use_group_attention_entropy_loss)
         self.group_attention_entropy_target = float(group_attention_entropy_target)
         self.use_cycle_slot_loss = bool(use_cycle_slot_loss)
@@ -68,6 +75,12 @@ class VariateReducer(nn.Module):
         self.cycle_b_norm = str(cycle_b_norm or 'row_l1')
         self.cycle_eps = float(cycle_eps)
         self.export_slot_diagnostics = bool(export_slot_diagnostics)
+        self.within_group_residual = bool(within_group_residual)
+        self.within_group_residual_gate_init = float(within_group_residual_gate_init)
+        self.within_group_residual_rank = int(within_group_residual_rank)
+        self.within_group_residual_mode = str(within_group_residual_mode or 'projection')
+        self.within_group_residual_gate_mode = str(within_group_residual_gate_mode or 'scalar')
+        self.latest_within_group_residual_gate = 0.0
         self.latest_aux_loss = None
         self.latest_aux_losses = None
         self.latest_selected_indices = None
@@ -116,6 +129,7 @@ class VariateReducer(nn.Module):
             'query_decoder_scalar_residual',
             'query_decoder_variate_residual',
             'token_query_decoder',
+            'masked_token_query_decoder',
         }
         if self.expansion_type not in valid_expansion_types:
             raise ValueError('Unknown variate expansion type: {}'.format(self.expansion_type))
@@ -644,6 +658,18 @@ class VariateReducer(nn.Module):
 
         self.register_buffer('group_ids', group_ids, persistent=True)
         self.register_buffer('group_counts', counts, persistent=True)
+        if (
+            not hasattr(self, 'anchor_indices')
+            and anchor_map is not None
+            and 'anchor_indices' in anchor_map
+        ):
+            # Grouped reducers use the map's medoids for diagnostics and residual decoding,
+            # but keeping this runtime-only avoids invalidating existing checkpoints.
+            self.register_buffer(
+                'anchor_indices',
+                self._validate_anchor_indices(anchor_map['anchor_indices']),
+                persistent=False,
+            )
         self.register_buffer('fixed_compress_weight', compress_weight, persistent=True)
         self.register_buffer('fixed_group_mean_weight', group_mean_weight, persistent=True)
         if not hasattr(self, 'group_member_indices'):
@@ -680,6 +706,48 @@ class VariateReducer(nn.Module):
             )
             source_init = compress_weight.sum(dim=0).clamp_min(1e-8)
             self.group_rep_source_logits = nn.Parameter(torch.log(source_init))
+        if self.within_group_residual and self.reduction_type == 'grouped_soft_representative':
+            if self.within_group_residual_mode == 'projection':
+                if self.within_group_residual_rank and self.within_group_residual_rank > 0:
+                    r = int(self.within_group_residual_rank)
+                    self.within_group_proj = nn.Sequential(
+                        nn.Linear(self.d_model, r, bias=False),
+                        nn.Linear(r, self.d_model, bias=False),
+                    )
+                    nn.init.zeros_(self.within_group_proj[1].weight)
+                else:
+                    self.within_group_proj = nn.Linear(self.d_model, self.d_model, bias=False)
+                    nn.init.zeros_(self.within_group_proj.weight)
+            elif self.within_group_residual_mode in {'attention', 'attention_context'}:
+                if self.d_model % self.n_heads != 0:
+                    raise ValueError('d_model must be divisible by n_heads for within-group attention')
+                self.within_group_attention = nn.MultiheadAttention(
+                    self.d_model,
+                    self.n_heads,
+                    batch_first=True,
+                )
+                if self.within_group_residual_mode == 'attention_context':
+                    self.within_group_attention_norm = nn.LayerNorm(self.d_model)
+                self.within_group_attention_out = nn.Linear(self.d_model, self.d_model, bias=False)
+                nn.init.zeros_(self.within_group_attention_out.weight)
+            else:
+                raise ValueError(
+                    'Unknown within_group_residual_mode: {}'.format(self.within_group_residual_mode)
+                )
+            if self.within_group_residual_gate_mode == 'variate':
+                # per-variable adaptive gate: each variable learns its own residual strength;
+                # variables/datasets that do not benefit drive their gate toward 0.
+                self.within_group_residual_gate = nn.Parameter(
+                    torch.full((self.target_num_variates,), self.within_group_residual_gate_init, dtype=torch.float32)
+                )
+            elif self.within_group_residual_gate_mode == 'scalar':
+                self.within_group_residual_gate = nn.Parameter(
+                    torch.tensor(self.within_group_residual_gate_init, dtype=torch.float32)
+                )
+            else:
+                raise ValueError(
+                    'Unknown within_group_residual_gate_mode: {}'.format(self.within_group_residual_gate_mode)
+                )
         expand_weight = torch.zeros(self.target_num_variates, self.reduced_k)
         target_ids = torch.arange(self.target_num_variates)
         expand_weight[target_ids, group_ids[:self.target_num_variates]] = 1.0
@@ -869,6 +937,12 @@ class VariateReducer(nn.Module):
         entropy = -(matrix * torch.log(matrix + eps)).sum(dim=-1)
         normalizer = torch.log(matrix.new_tensor(float(self.num_variates)))
         return torch.mean(entropy / (normalizer + eps))
+
+    def _expansion_weight_l2_loss(self, reference):
+        """L2 on the learned expansion map W_exp only: ||W_exp||_F^2 / (C K)."""
+        if not self.use_expansion_weight_l2_loss or not hasattr(self, 'slot_expand_linear'):
+            return reference.new_tensor(0.0)
+        return torch.mean(self.slot_expand_linear.weight.pow(2))
 
     def _group_attention_entropy_loss(self, group_weights, group_mask, eps=1e-8):
         if not self.use_group_attention_entropy_loss:
@@ -1102,6 +1176,7 @@ class VariateReducer(nn.Module):
             wcomp_entropy = orthogonal.new_tensor(0.0)
         else:
             wcomp_entropy = self._wcomp_entropy_loss(wcomp_matrix)
+        expansion_weight_l2 = self._expansion_weight_l2_loss(orthogonal)
         if cycle_matrix is None:
             cycle_slot = self._zero_cycle_diagnostics(orthogonal)
         else:
@@ -1118,6 +1193,7 @@ class VariateReducer(nn.Module):
             'coverage': coverage,
             'assignment_entropy': entropy,
             'wcomp_entropy': wcomp_entropy,
+            'expansion_weight_l2': expansion_weight_l2,
             'cycle_slot': cycle_slot,
             'group_attention_entropy': group_attention_entropy,
         }
@@ -1144,7 +1220,13 @@ class VariateReducer(nn.Module):
         }
 
     def _uses_token_query_decoder(self):
-        return self.expansion_type == 'token_query_decoder'
+        return self.expansion_type in {
+            'token_query_decoder',
+            'masked_token_query_decoder',
+        }
+
+    def _uses_masked_token_query_decoder(self):
+        return self.expansion_type == 'masked_token_query_decoder'
 
     def _uses_attention_decoder(self):
         return self._uses_learned_query_decoder() or self._uses_token_query_decoder()
@@ -1832,7 +1914,7 @@ class VariateReducer(nn.Module):
                         group_attention_weights=group_weights,
                         group_attention_mask=member_mask,
                     )
-                cache = {'A': A, 'group_weights': group_weights}
+                cache = {'A': A, 'group_weights': group_weights, 'representative': compressed_tokens}
                 self.latest_aux_loss = aux_loss
                 return compressed_tokens, cache, aux_loss
             else:
@@ -1983,17 +2065,108 @@ class VariateReducer(nn.Module):
             query = original_variates
         else:
             query = self.variate_queries.unsqueeze(0).expand(batch_size, -1, -1)
+        attn_mask = None
+        if self._uses_masked_token_query_decoder():
+            attn_mask = self.fixed_expand_mask.to(
+                device=latent_tokens.device,
+                dtype=torch.bool,
+            )
+            # MultiheadAttention uses True for disallowed query-key pairs.
+            attn_mask = ~attn_mask
         decoded, _ = self.query_decoder_attn(
             query=query,
             key=latent_tokens,
             value=latent_tokens,
+            attn_mask=attn_mask,
             need_weights=False,
         )
+        if self._uses_masked_token_query_decoder():
+            # Keep each variable's own token as the identity path and use the
+            # routed latent attention strictly as an interaction message.
+            decoded = query + decoded
         if self._uses_residual_decoder() and use_residual:
             if original_variates is None:
                 raise ValueError('original_variates must be provided when residual query decoder is enabled')
             decoded = decoded + torch.tanh(self.residual_gate) * original_variates
         return decoded
+
+    def _apply_within_group_residual(
+        self,
+        decoded,
+        latent_tokens=None,
+        cache=None,
+        original_variates=None,
+        use_residual=True,
+    ):
+        if not getattr(self, 'within_group_residual', False):
+            return decoded
+        if not use_residual or self.reduction_type != 'grouped_soft_representative':
+            return decoded
+        if original_variates is None or not isinstance(cache, dict) or 'representative' not in cache:
+            return decoded
+        representative = cache['representative']  # [B, K, D]
+        gids = self.group_ids.to(representative.device)[:self.target_num_variates]
+        z_gathered = representative.index_select(1, gids)  # [B, C, D]
+        deviation = original_variates[:, :self.target_num_variates, :] - z_gathered
+        if self.within_group_residual_mode == 'projection':
+            residual = self.within_group_proj(deviation)
+        elif self.within_group_residual_mode in {'attention', 'attention_context'}:
+            if self.within_group_residual_mode == 'attention_context':
+                if latent_tokens is None:
+                    raise ValueError('latent_tokens must be provided for attention_context residual mode')
+                if latent_tokens.shape[1] != self.reduced_k:
+                    raise ValueError('latent_tokens does not match reduced_k for attention_context residual mode')
+            member_indices = self.group_member_indices.to(original_variates.device)
+            member_mask = self.group_member_mask.to(original_variates.device)
+            batch_size, num_groups, max_group_size = (
+                original_variates.shape[0],
+                member_indices.shape[0],
+                member_indices.shape[1],
+            )
+            d_model = original_variates.shape[-1]
+            member_tokens = original_variates.index_select(1, member_indices.reshape(-1)).view(
+                batch_size,
+                num_groups,
+                max_group_size,
+                d_model,
+            )
+            member_deviation = member_tokens - representative.unsqueeze(2)
+            attention_input = member_deviation
+            if self.within_group_residual_mode == 'attention_context':
+                attention_input = self.within_group_attention_norm(
+                    member_deviation + latent_tokens.unsqueeze(2)
+                )
+            flat_deviation = attention_input.reshape(batch_size * num_groups, max_group_size, d_model)
+            padding_mask = (~member_mask).view(1, num_groups, max_group_size).expand(
+                batch_size,
+                -1,
+                -1,
+            ).reshape(batch_size * num_groups, max_group_size)
+            attended, _ = self.within_group_attention(
+                flat_deviation,
+                flat_deviation,
+                flat_deviation,
+                key_padding_mask=padding_mask,
+                need_weights=False,
+            )
+            attended = self.within_group_attention_out(attended).view(
+                batch_size,
+                num_groups,
+                max_group_size,
+                d_model,
+            )
+            attended = attended * member_mask.view(1, num_groups, max_group_size, 1).to(attended.dtype)
+            residual = decoded.new_zeros(batch_size, self.target_num_variates, d_model)
+            scatter_index = member_indices.reshape(-1).view(1, -1, 1).expand(batch_size, -1, d_model)
+            residual.scatter_add_(1, scatter_index, attended.reshape(batch_size, -1, d_model))
+        else:
+            raise RuntimeError('Unknown within_group_residual_mode: {}'.format(self.within_group_residual_mode))
+        gate_raw = torch.tanh(self.within_group_residual_gate)  # scalar or [C]
+        gate = gate_raw.to(decoded.dtype)
+        if gate.dim() == 1:  # per-variable gate → broadcast over [B, C, D]
+            gate = gate.view(1, -1, 1)
+        self.latest_within_group_residual_gate = float(gate_raw.detach().mean().cpu().item())
+        return decoded + gate * residual
 
     def _apply_linear_residual(self, decoded, original_variates=None, use_residual=True):
         if self.expansion_type not in {
@@ -2144,6 +2317,13 @@ class VariateReducer(nn.Module):
                 decoded = self._apply_sparse_softmax_expansion(latent_tokens)
             else:
                 decoded = self.expand_linear(latent_tokens.transpose(1, 2)).transpose(1, 2)
+            decoded = self._apply_within_group_residual(
+                decoded,
+                latent_tokens=latent_tokens,
+                cache=cache,
+                original_variates=original_variates,
+                use_residual=use_residual,
+            )
             return self._apply_linear_residual(decoded, original_variates=original_variates, use_residual=use_residual)
         if self.reduction_type == 'mlp_slot_attention_hybrid_linear':
             decoded = self.expand_linear(latent_tokens.transpose(1, 2)).transpose(1, 2)
