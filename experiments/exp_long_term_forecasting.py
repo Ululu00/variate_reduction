@@ -43,8 +43,71 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         return data_set, data_loader
 
     def _select_optimizer(self):
-        model_optim = optim.Adam(self.model.parameters(), lr=self.args.learning_rate)
-        return model_optim
+        base_learning_rate = float(self.args.learning_rate)
+        mass_learning_rate = float(
+            getattr(self.args, 'sender_mass_learning_rate', 0.0) or 0.0
+        )
+        sender_mass_mode = str(getattr(self.args, 'sender_mass_mode', 'fixed'))
+        if not np.isfinite(mass_learning_rate) or mass_learning_rate < 0.0:
+            raise ValueError('sender_mass_learning_rate must be finite and non-negative')
+
+        # The default path deliberately remains the original one-group Adam
+        # construction so existing runs have identical grouping and defaults.
+        if mass_learning_rate == 0.0:
+            return optim.Adam(self.model.parameters(), lr=base_learning_rate)
+
+        if sender_mass_mode not in {'learned_global', 'learned_layer_head'}:
+            raise ValueError(
+                'sender_mass_learning_rate > 0 requires a learned sender_mass_mode'
+            )
+        if not np.isfinite(base_learning_rate) or base_learning_rate <= 0.0:
+            raise ValueError(
+                'positive sender_mass_learning_rate requires a finite positive learning_rate'
+            )
+
+        all_parameters = list(self.model.parameters())
+        mass_parameters = [
+            parameter
+            for name, parameter in self.model.named_parameters()
+            if name.rsplit('.', 1)[-1] == 'sender_mass_power_theta'
+        ]
+        if len(mass_parameters) != 1:
+            raise ValueError(
+                'learned sender_mass_mode with a dedicated learning rate requires exactly '
+                'one parameter named sender_mass_power_theta; found {}'.format(
+                    len(mass_parameters)
+                )
+            )
+        mass_parameter_ids = {id(parameter) for parameter in mass_parameters}
+        base_parameters = [
+            parameter
+            for parameter in all_parameters
+            if id(parameter) not in mass_parameter_ids
+        ]
+        grouped_parameters = base_parameters + mass_parameters
+        grouped_ids = [id(parameter) for parameter in grouped_parameters]
+        all_ids = [id(parameter) for parameter in all_parameters]
+        if len(grouped_ids) != len(set(grouped_ids)):
+            raise RuntimeError('optimizer parameter groups contain duplicate parameters')
+        if set(grouped_ids) != set(all_ids):
+            raise RuntimeError('optimizer parameter groups do not cover every model parameter')
+
+        return optim.Adam(
+            [
+                {
+                    'params': base_parameters,
+                    'lr': base_learning_rate,
+                    'group_name': 'base',
+                },
+                {
+                    'params': mass_parameters,
+                    'lr': mass_learning_rate,
+                    'lr_scale': mass_learning_rate / base_learning_rate,
+                    'group_name': 'sender_mass_power',
+                },
+            ],
+            lr=base_learning_rate,
+        )
 
     def _select_criterion(self):
         criterion = nn.MSELoss()
@@ -69,6 +132,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             'coverage': outputs.new_tensor(0.0),
             'assignment_entropy': outputs.new_tensor(0.0),
             'wcomp_entropy': outputs.new_tensor(0.0),
+            'expansion_weight_l2': outputs.new_tensor(0.0),
             'group_attention_entropy': outputs.new_tensor(0.0),
         }
 
@@ -124,6 +188,12 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         loss = loss + weighted_wcomp_entropy
         components['wcomp_entropy_loss'] = aux_losses.get('wcomp_entropy', outputs.new_tensor(0.0))
         components['weighted_wcomp_entropy_loss'] = weighted_wcomp_entropy
+        weighted_expansion_weight_l2 = getattr(self.args, 'expansion_weight_l2_loss_weight', 0.0) * aux_losses.get(
+            'expansion_weight_l2', outputs.new_tensor(0.0)
+        )
+        loss = loss + weighted_expansion_weight_l2
+        components['expansion_weight_l2_loss'] = aux_losses.get('expansion_weight_l2', outputs.new_tensor(0.0))
+        components['weighted_expansion_weight_l2_loss'] = weighted_expansion_weight_l2
         weighted_group_entropy = getattr(self.args, 'group_attention_entropy_loss_weight', 0.0) * aux_losses.get(
             'group_attention_entropy', outputs.new_tensor(0.0)
         )
@@ -181,7 +251,8 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             torch.cuda.synchronize(self.device)
 
     def vali(self, vali_data, vali_loader, criterion):
-        total_loss = []
+        total_loss = 0.0
+        total_elements = 0
         max_eval_batches = int(getattr(self.args, 'max_eval_batches', 0) or 0)
         self.model.eval()
         with torch.no_grad():
@@ -219,10 +290,14 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
                 loss = criterion(pred, true)
 
-                total_loss.append(loss)
+                num_elements = pred.numel()
+                total_loss += float(loss.item()) * num_elements
+                total_elements += num_elements
                 if max_eval_batches > 0 and (i + 1) >= max_eval_batches:
                     break
-        total_loss = np.average(total_loss)
+        if total_elements == 0:
+            raise RuntimeError('validation loader produced no elements')
+        total_loss = total_loss / total_elements
         self.model.train()
         return total_loss
 
